@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "server": {
+    "port": 4096
+  },
+  "permission": {
+    "*": "allow"
+  },
+  "agent": {
+    "reviewer": {
+      "mode": "primary",
+      "prompt": "{file:./prompts/reviewer.txt}"
+    },
+    "fixer": {
+      "mode": "primary",
+      "prompt": "{file:./prompts/fixer.txt}"
+    }
+  }
+}
