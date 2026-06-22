@@ -7,13 +7,13 @@
     "*": "allow"
   },
   "agent": {
-    "reviewer": {
+    "pr-reviewer": {
       "mode": "primary",
-      "prompt": "{file:./prompts/reviewer.txt}"
+      "prompt": "{file:./prompts/pr-reviewer.txt}"
     },
-    "fixer": {
+    "issue-resolver": {
       "mode": "primary",
-      "prompt": "{file:./prompts/fixer.txt}"
+      "prompt": "{file:./prompts/issue-resolver.txt}"
     }
   }
 }
