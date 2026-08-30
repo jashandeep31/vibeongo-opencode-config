@@ -15,5 +15,12 @@
       "mode": "primary",
       "prompt": "{file:./prompts/issue-resolver.txt}"
     }
+  },
+   "mcp": {
+    "agent-browser": {
+      "type": "local",
+      "command": ["agent-browser", "mcp"],
+      "enabled": true
+    }
   }
 }
