@@ -21,6 +21,11 @@
       "type": "local",
       "command": ["agent-browser", "mcp"],
       "enabled": true
+    },
+     "vibeongo-core-mcp": {
+      "type": "local",
+      "command": ["vibeongo", "mcp"],
+      "enabled": true
     }
   }
 }
