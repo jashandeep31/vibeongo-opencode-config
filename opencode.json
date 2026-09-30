@@ -31,5 +31,16 @@
       "command": ["vibeongo", "mcp"],
       "enabled": true
     }
+  },
+  "providers": {
+    "vibeongo_ai": {
+      "name": "Vibeongo AI",
+      "env": ["VIBEONGO_AI_API_KEY"],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "https://openrouter.ai/api/v1"
+      },
+      "models": {}
+    }
   }
 }
