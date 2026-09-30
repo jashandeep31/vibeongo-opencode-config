@@ -12,23 +12,52 @@ async function readToken() {
   return token
 }
 
-// session events forwarded to the webhook; add "session.execution.failed" etc. here later
-const WEBHOOK_EVENTS = new Set(["session.execution.succeeded"])
+// events that need the user, forwarded to the webhook
+const WEBHOOK_EVENTS = new Set([
+  "session.execution.succeeded", // the agent finished
+  "session.execution.failed", // the agent stopped with an error
+  "session.execution.interrupted", // only the reasons in NOTIFY_INTERRUPT_REASONS
+  "form.created", // the agent asks the user a question
+  "permission.asked", // the agent waits for a permission
+])
 
-// subagent (child) sessions: opencode sends execution events for them too, but the
-// user only cares about the main session, so every forwarded event is filtered by this
-const subagentSessions = new Set()
+// "user", "shutdown" and "superseded" are stopped on purpose, nothing to tell
+const NOTIFY_INTERRUPT_REASONS = new Set(["inactivity"])
 
-function trackSubagentSessions(event) {
-  if (event.type === "session.created" && event.data?.parentID) {
-    subagentSessions.add(event.data.sessionID)
-  } else if (event.type === "session.deleted") {
-    subagentSessions.delete(event.data?.sessionID)
+// subagents run inside a main chat: their questions and permission requests
+// block that chat, so they are sent for it; their own runs ending are not
+const SUBAGENT_EVENTS_TO_NOTIFY = new Set(["form.created", "permission.asked"])
+
+// the opencode session an event belongs to
+const sessionIDOf = (event) =>
+  event.type === "form.created" ? event.data?.form?.sessionID : event.data?.sessionID
+
+// the main chat a session belongs to, walking up from subagents
+async function resolveChat(ctx, sessionID) {
+  let session = await ctx.session.get({ sessionID })
+  const isSubagent = Boolean(session.parentID)
+  // subagents can nest, never deeply
+  for (let depth = 0; session.parentID && depth < 10; depth++) {
+    session = await ctx.session.get({ sessionID: session.parentID })
   }
+  return { session, isSubagent }
 }
 
-function isSubagentSession(sessionID) {
-  return subagentSessions.has(sessionID)
+// short text about what happened, shown in the notification body
+function detailOf(event) {
+  switch (event.type) {
+    case "session.execution.failed":
+      return event.data?.error?.message
+    case "session.execution.interrupted":
+      return event.data?.reason
+    case "form.created":
+      return event.data?.form?.title
+    case "permission.asked":
+      return (
+        event.data?.message ??
+        [event.data?.action, ...(event.data?.resources ?? [])].filter(Boolean).join(" ")
+      )
+  }
 }
 
 // hidden agent (like opencode's "title" agent): not in the agent list, no tools,
@@ -92,12 +121,21 @@ function withTimeout(promise, ms) {
   ])
 }
 
+// opencode's placeholder for a chat that has no title yet
+const UNTITLED_PATTERN = /^(New session|Child session) - \d{4}-\d{2}-\d{2}T[\d:.]+Z$/
+
+// the chat's real title, undefined when it has none
+function chatTitleOf(session) {
+  const title = session?.title?.trim()
+  if (!title || UNTITLED_PATTERN.test(title)) return undefined
+  return truncate(title, MAX_TITLE_LENGTH)
+}
+
 // title and body written by the notification agent with the chat's own model,
 // undefined on any failure so the server falls back to its default text
-async function craftNotification(ctx, sessionID) {
+async function craftNotification(ctx, sessionID, session) {
   try {
-    const [session, messages, agent] = await Promise.all([
-      ctx.session.get({ sessionID }),
+    const [messages, agent] = await Promise.all([
       ctx.session.context({ sessionID }),
       ctx.agent.get({ agentID: NOTIFICATION_AGENT_ID }).catch(() => undefined),
     ])
@@ -107,31 +145,71 @@ async function craftNotification(ctx, sessionID) {
 
     const prompt = [
       agent?.system ?? NOTIFICATION_PROMPT,
-      `Chat title: ${session.title ?? "Untitled"}`,
+      `Chat title: ${chatTitleOf(session) ?? "Untitled"}`,
       `Last messages:\n${conversation}`,
     ].join("\n\n")
 
     // a model set on the agent in the user's config wins, otherwise the chat's model
     const model = agent?.model ?? session.model
-    const result = await withTimeout(
-      ctx.generate.text({ prompt, ...(model ? { model } : {}) }),
-      GENERATE_TIMEOUT_MS,
-    )
+    let result
+    try {
+      // cheap: only the title and last messages, no session attached
+      result = await withTimeout(
+        ctx.generate.text({ prompt, ...(model ? { model } : {}) }),
+        GENERATE_TIMEOUT_MS,
+      )
+    } catch {
+      // opencode's free tier rejects requests without session headers ("can only be used
+      // from within OpenCode"); session.generate sends them, but with the whole chat as
+      // context, so it is only the fallback. It never writes to the session.
+      result = await withTimeout(
+        ctx.session.generate({ sessionID, prompt: agent?.system ?? NOTIFICATION_PROMPT }),
+        GENERATE_TIMEOUT_MS,
+      )
+    }
     return parseNotification(result.text)
-  } catch (error) {
-    console.error("session-success-webhook: could not craft notification", error)
+  } catch {
     return undefined
   }
 }
 
 async function sendWebhook(ctx, event) {
   try {
-    const notification = await craftNotification(ctx, event.data.sessionID)
+    if (
+      event.type === "session.execution.interrupted" &&
+      !NOTIFY_INTERRUPT_REASONS.has(event.data?.reason)
+    )
+      return
+
+    const sessionID = sessionIDOf(event)
+    // "global" is the owner of MCP elicitation forms, not a chat
+    const chat =
+      sessionID && sessionID !== "global"
+        ? await resolveChat(ctx, sessionID).catch(() => undefined)
+        : undefined
+    if (chat?.isSubagent && !SUBAGENT_EVENTS_TO_NOTIFY.has(event.type)) return
+
+    const chatTitle = chatTitleOf(chat?.session)
+    const detail = detailOf(event)?.trim()
+    // only a finished run gets AI written text: the others are urgent and
+    // their default text with the detail says what is needed
+    const notification =
+      event.type === "session.execution.succeeded" && chat
+        ? await craftNotification(ctx, chat.session.id, chat.session)
+        : undefined
     const token = await readToken()
     const response = await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: token },
-      body: JSON.stringify({ ...event, ...(notification ? { notification } : {}) }),
+      // chatSessionID is the main chat to open (differs for subagents),
+      // chatTitle and detail let the server's default text say what happened
+      body: JSON.stringify({
+        ...event,
+        ...(chat ? { chatSessionID: chat.session.id } : {}),
+        ...(chatTitle ? { chatTitle } : {}),
+        ...(detail ? { detail: truncate(detail, MAX_BODY_LENGTH) } : {}),
+        ...(notification ? { notification } : {}),
+      }),
       signal: AbortSignal.timeout(5000),
     })
     if (!response.ok) {
@@ -160,9 +238,7 @@ export default {
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-          trackSubagentSessions(event)
           if (!WEBHOOK_EVENTS.has(event.type)) continue
-          if (isSubagentSession(event.data?.sessionID)) continue
 
           // not awaited: generating the text takes seconds and must not block the event stream
           void sendWebhook(ctx, event)
