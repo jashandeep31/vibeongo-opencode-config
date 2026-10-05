@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-const WEBHOOK_URL = "http://localhost:3101/webhook/opencode"
+const WEBHOOK_URL = "http://127.0.0.1:3102/webhook/opencode"
 const TOKEN_PATH = join(homedir(), ".config", "vibeongo", "webhook-token.txt")
 
 // read on every request so a token created after opencode started is still picked up
@@ -200,7 +200,8 @@ async function sendWebhook(ctx, event) {
     const token = await readToken()
     const response = await fetch(WEBHOOK_URL, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: token },
+      redirect: "error",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       // chatSessionID is the main chat to open (differs for subagents),
       // chatTitle and detail let the server's default text say what happened
       body: JSON.stringify({
